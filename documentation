@@ -1,0 +1,7 @@
+
+# get wheels from: https://www.lfd.uci.edu/~gohlke/pythonlibs/#gdal
+
+# install GDAL on windows:
+pip install C:/Users/james/Downloads/GDAL-3.3.3-cp37-cp37m-win_amd64.whl
+# install fiona on windows:
+pip install C:/Users/james/Downloads/Fiona-1.8.20-cp37-cp37m-win_amd64.whl
