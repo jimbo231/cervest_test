@@ -6,7 +6,8 @@ import pandas as pd
 from shapely.geometry import Point
 import geopandas as gpd
 from geopandas import GeoDataFrame
-from python.functions import open_net_cdf_file, plot_coordinates, get_variable_values, create_grid_charts, clean_anomalies
+from python.functions import open_net_cdf_file, plot_coordinates, get_variable_values, create_grid_charts
+from statsmodels.tsa.seasonal import seasonal_decompose
 
 
 # load the data set
@@ -57,7 +58,7 @@ def get_master_df(weather_data):
 master_df = get_master_df(weather_data)
 # 2.) get the 95th percentile as a column by each location
 master_df.reset_index(level=0, inplace=True)
-master_df['group'] = master_df['longitude'].astype(str) + master_df['latitude'].astype(str)
+master_df['group'] = master_df['longitude'].astype(str) + ',' + master_df['latitude'].astype(str)
 master_df['95th'] = master_df['VAR_2T'].groupby(master_df['group']).transform(lambda x: x.drop_duplicates().quantile(0.95))
 
 # 3.) make a heatwave dummy
@@ -67,12 +68,13 @@ master_df['year'] = pd.DatetimeIndex(master_df['time']).year.astype(str)
 
 # 4.) we want the annual longest heatwave by year and location
 master_df['heatwave_shift'] = master_df['heatwave'].groupby(master_df['group']).shift(-1)
-
 unique_heatwave = 1  # need this to make the new unique heatwave reference each time
+
+
 def get_longest_heatwave(row):
     global unique_heatwave
     if row['heatwave'] == 0 and row['heatwave_shift'] == 1:
-        # then we have the start of the heatwave
+        # then we are just before the start of the heatwave
         val = 0
     elif row['heatwave'] == 1 and row['heatwave_shift'] == 1:
         # then we are in the heatwave
@@ -86,59 +88,110 @@ def get_longest_heatwave(row):
     return val
 
 
+# create a unique heatwave indicator for each one
 master_df['unique_heatwave'] = master_df.apply(get_longest_heatwave, axis=1)
-check = master_df.loc[master_df['heatwave'] == 1]
+master_df['unique_heatwave'] = master_df['unique_heatwave'].astype(str)
+# get the sum of the days in each unique heatwave
+master_df['heatwave_days'] = master_df['heatwave'].groupby(master_df['unique_heatwave']).transform('sum')
+# lastly create an identifier to get the maximum heatwave by year and location
+master_df['max_heatwave'] = master_df.groupby(['year', 'group'])['heatwave_days'].transform('max')
+master_df['max_heatwave_indicator'] = np.where(master_df['max_heatwave'] == master_df['heatwave_days'], 1, 0)
+check = master_df.loc[master_df['heatwave'] == 1] # quick check
 
-# now we just need the sum of heatwaves by
+np.where(master_df['VAR_2T'] > master_df['95th'], 1, 0)
 
-master_df['heatwave'].groupby(master_df['test']).sum
-
-
-
-data = {'A':[1,4,3,5],'B':[0,6,3,0],'C':[1,1,3,0]} #sample data
-df = pd.DataFrame(data)
-
-for rindex, row in df.iterrows():
-        print("row", rindex, "column ", cindex, "value ", value)
-
-
+# 5.) Create charts for the longest heatwave by each year and location
+to_chart = master_df[master_df['max_heatwave_indicator'] == 1].groupby(['year', 'group'], as_index=False).agg({'heatwave_days':'max'})
+to_chart['heatwave_days'] = np.log(to_chart['heatwave_days'])
 
 
+def get_current_heatwave_df(df, list_to_pick, number):
+    current_chart = df[df['group'] == list_to_pick[number]]
+    current_chart['year'] = pd.to_datetime(current_chart['year'])
+    current_chart.set_index('year', inplace=True)
+    current_chart.drop('group', axis=1, inplace=True)
+    return current_chart
 
 
-master_df['cumsum_heatwave'] = master_df['heatwave'].groupby(master_df['group'], master_df['year']).transform(lambda x: x.cumsum())
+def create_grid_bar_charts(df, save_path):
+    fig, axes = plt.subplots(4, 3, sharex=True, sharey=True, figsize=(6, 6))
+    fig.text(0.5, 0, 'Year', ha='center')
+    fig.text(0.01, 0.5, 'Log Length of Heatwave (hours)', va='center', rotation='vertical')
+    list_of_groups = df['group'].unique()
+    count = 0
+    for row in axes:
+        row[0].plot(get_current_heatwave_df(df, list_of_groups, 0 + count*3))
+        row[0].set_title(list_of_groups[0 + count*3])
+        row[1].plot(get_current_heatwave_df(df, list_of_groups, 1 + count*3))
+        row[1].set_title(list_of_groups[1 + count * 3])
+        row[2].plot(get_current_heatwave_df(df, list_of_groups, 2 + count*3))
+        row[2].set_title(list_of_groups[2 + count * 3])
+        count += 1
+        row[0].tick_params(axis='x', rotation=90)
+        row[1].tick_params(axis='x', rotation=90)
+        row[2].tick_params(axis='x', rotation=90)
 
-    master_df.groupby('group', 'year')['heatwave'].transform(lambda x: x.cumsum)
-
-
-
-master_df.columns
-
-master_df.groupby('group', 'year')['heatwave'].cumsum
-
-# basically an if else statement, if 1 in heatwave and shift value is zero then 1,
-# elif 1 in heatwave and shift value = 1 (in a heatwave) therefore cumsum
-
-master_df.columns
-
-master_df.VAR_2T.quantile()
-
-
-
-
-
-
-
+    plt.subplots_adjust(wspace=0.05, hspace=0.5)
+    plt.show()
+    plt.savefig(save_path)
 
 
+create_grid_bar_charts(to_chart, save_path='charts/max_heatwave_by_year.png')
+
+# 6.) Report mean, std.dev and max of the distribution of annual heatwaves
+to_report = master_df[master_df['max_heatwave_indicator'] == 1].groupby(['year', 'group'], as_index=False).agg({'heatwave_days':'max'})
+to_report['heatwave_days'].mean()  # 24.86
+to_report['heatwave_days'].max()   # 259
+to_report['heatwave_days'].std()   # 27.07
+
+
+# 7.) is there a statistically significant upward trend in the length of max heatwave days?
+# we want to decompose each time series into the trend and seasonality parts
+# Multiplicative Decomposition
+
+to_chart = master_df[master_df['max_heatwave_indicator'] == 1].groupby(['year', 'group'], as_index=False).agg({'heatwave_days':'max'})
+list_of_groups = to_chart['group'].unique()
+get_trend = master_df[master_df['group'] == list_of_groups[10]]
+get_trend['year'] = pd.to_datetime(get_trend['year'])
+get_trend.set_index('time', inplace=True)
+get_trend = get_trend[['VAR_2T']]
+get_trend.fillna(get_trend.mean())
+get_trend['VAR_2T'] = get_trend['VAR_2T'].replace(np.nan, get_trend['VAR_2T'].mean())
+# get_trend['VAR_2T'] = np.where(get_trend['VAR_2T'] == 'nan', get_trend['VAR_2T'].mean(), get_trend['VAR_2T'])
+# get_trend.sort_index(inplace=True)
+
+
+# Multiplicative Decomposition
+result_mul = seasonal_decompose(get_trend['VAR_2T'], model='multiplicative', period=8760*5)
+# Additive Decomposition
+result_add = seasonal_decompose(get_trend['VAR_2T'], model='additive', period=8760*5)
+
+# Plot
+plt.rcParams.update({'figure.figsize': (10, 10)})
+result_mul.plot()
+# result_add.plot().suptitle('Additive Decompose', fontsize=22)
+plt.show()
 
 
 
 
 
+to_chart = master_df[master_df['max_heatwave_indicator'] == 1].groupby(['year', 'group'], as_index=False).agg({'heatwave_days':'max'})
+list_of_groups = to_chart['group'].unique()
+get_trend = to_chart[to_chart['group'] == list_of_groups[10]]
+get_trend['year'] = pd.to_datetime(get_trend['year'])
+get_trend.set_index('year', inplace=True)
+get_trend = get_trend[['heatwave_days']]
 
+# Multiplicative Decomposition
+result_mul = seasonal_decompose(get_trend['heatwave_days'], model='multiplicative', period=5)
+# Plot
+plt.rcParams.update({'figure.figsize': (10, 10)})
+result_mul.plot()
 
+# result_add.plot().suptitle('Additive Decompose', fontsize=22)
+plt.show()
+# should save this
+result_mul.trend.plot()
 
-
-
-
+# to run a trend test do the following: https://www.statology.org/mann-kendall-test-python/
