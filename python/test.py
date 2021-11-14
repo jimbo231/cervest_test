@@ -1,13 +1,13 @@
-import xarray as xr
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import pandas as pd
-from shapely.geometry import Point
-import geopandas as gpd
-from geopandas import GeoDataFrame
 from python.functions import open_net_cdf_file, plot_coordinates, get_variable_values, create_grid_charts
 from statsmodels.tsa.seasonal import seasonal_decompose
+import pymannkendall as mk
+import statsmodels.tsa.stattools as ts
+from statsmodels.tsa.api import VAR
+from statsmodels.tsa.stattools import adfuller
 
 
 # load the data set
@@ -27,7 +27,8 @@ uk_map = plot_coordinates(weather_data['VAR_2T']['longitude'].values, weather_da
 uk_map.get_figure().savefig("charts/uk_coordinate_map.png")
 
 # plot each location's temperature over time
-create_grid_charts(weather_data, save_path='charts/anomaly_chart.png', clean_anomalies=False)
+create_grid_charts(weather_data, save_path='charts/anomaly_chart.png',
+                   clean_anomalies=False, moving_average=False)
 mpl.rc('lines', linewidth=0.5)  # change the global line width for all charts
 create_grid_charts(weather_data, save_path='charts/anomaly_chart_cleaned.png',
                    clean_anomalies=True, moving_average=False)
@@ -96,7 +97,7 @@ master_df['heatwave_days'] = master_df['heatwave'].groupby(master_df['unique_hea
 # lastly create an identifier to get the maximum heatwave by year and location
 master_df['max_heatwave'] = master_df.groupby(['year', 'group'])['heatwave_days'].transform('max')
 master_df['max_heatwave_indicator'] = np.where(master_df['max_heatwave'] == master_df['heatwave_days'], 1, 0)
-check = master_df.loc[master_df['heatwave'] == 1] # quick check
+check = master_df.loc[master_df['heatwave'] == 1]  # quick check
 
 np.where(master_df['VAR_2T'] > master_df['95th'], 1, 0)
 
@@ -148,34 +149,6 @@ to_report['heatwave_days'].std()   # 27.07
 # 7.) is there a statistically significant upward trend in the length of max heatwave days?
 # we want to decompose each time series into the trend and seasonality parts
 # Multiplicative Decomposition
-
-to_chart = master_df[master_df['max_heatwave_indicator'] == 1].groupby(['year', 'group'], as_index=False).agg({'heatwave_days':'max'})
-list_of_groups = to_chart['group'].unique()
-get_trend = master_df[master_df['group'] == list_of_groups[10]]
-get_trend['year'] = pd.to_datetime(get_trend['year'])
-get_trend.set_index('time', inplace=True)
-get_trend = get_trend[['VAR_2T']]
-get_trend.fillna(get_trend.mean())
-get_trend['VAR_2T'] = get_trend['VAR_2T'].replace(np.nan, get_trend['VAR_2T'].mean())
-# get_trend['VAR_2T'] = np.where(get_trend['VAR_2T'] == 'nan', get_trend['VAR_2T'].mean(), get_trend['VAR_2T'])
-# get_trend.sort_index(inplace=True)
-
-
-# Multiplicative Decomposition
-result_mul = seasonal_decompose(get_trend['VAR_2T'], model='multiplicative', period=8760*5)
-# Additive Decomposition
-result_add = seasonal_decompose(get_trend['VAR_2T'], model='additive', period=8760*5)
-
-# Plot
-plt.rcParams.update({'figure.figsize': (10, 10)})
-result_mul.plot()
-# result_add.plot().suptitle('Additive Decompose', fontsize=22)
-plt.show()
-
-
-
-
-
 to_chart = master_df[master_df['max_heatwave_indicator'] == 1].groupby(['year', 'group'], as_index=False).agg({'heatwave_days':'max'})
 list_of_groups = to_chart['group'].unique()
 get_trend = to_chart[to_chart['group'] == list_of_groups[10]]
@@ -188,10 +161,67 @@ result_mul = seasonal_decompose(get_trend['heatwave_days'], model='multiplicativ
 # Plot
 plt.rcParams.update({'figure.figsize': (10, 10)})
 result_mul.plot()
+plt.savefig('charts/trend_vs_seasonality_decomposition.png')
 
-# result_add.plot().suptitle('Additive Decompose', fontsize=22)
-plt.show()
-# should save this
-result_mul.trend.plot()
+# Testing if the trend is significant using the mann-kendall-test
+result_list = []
+for i in range(0, 13):
+    # get the list of values we are testing
+    to_test = list(to_chart[to_chart['group'] == list_of_groups[i]]['heatwave_days'])
+    # run the test
+    test_result = mk.original_test(to_test)
+    # append the result to a list of dictionaries
+    result_list.append({
+        'location': list_of_groups[i],
+        'trend': test_result.trend,
+        'result': test_result.h,
+        'p_value': round(test_result.p, 4),
+        'slope': round(test_result.slope, 4)
+    })
 
-# to run a trend test do the following: https://www.statology.org/mann-kendall-test-python/
+# now can look at the results and easily save them as a png
+df_results = pd.DataFrame(result_list)
+
+
+# 7: co-integration test and VAR Model
+
+# 51.5, 0 is position 6 while (51.75, -1.25) does not exist but 51.75, -0.25 is closest to using this one (position 0)
+list_of_groups
+
+y_0 = list(to_chart[to_chart['group'] == list_of_groups[6]]['heatwave_days'])
+y_1 = list(to_chart[to_chart['group'] == list_of_groups[0]]['heatwave_days'])
+
+# The null hypothesis is no co-integration. Variables in y0 and y1 are assumed to be integrated of order 1, I(1).
+# gives a p-value of 0.034 then we can reject the hypothesis that there is no co-integrating relationship
+ts.coint(y_0, y_1)
+
+# set up a data frame for the VAR model
+y_0 = to_chart[to_chart['group'] == list_of_groups[6]][['year', 'heatwave_days']]
+y_0.columns = ['year', '51.5, 0']
+y_1 = to_chart[to_chart['group'] == list_of_groups[0]][['year', 'heatwave_days']]
+y_1.columns = ['year', '51.75, -0.25']
+
+var_df = y_0.merge(y_1)
+# make the year column the index
+var_df['year'] = pd.to_datetime(var_df['year'])
+var_df.set_index('year', inplace=True)
+
+# split it into the training and test set
+n_obs = 4
+df_train, df_test = var_df[0:-n_obs], var_df[-n_obs:]
+
+# check if stationary (using a unit root test)
+adfuller(var_df['51.5, 0'], autolag='AIC')
+adfuller(var_df['51.75, -0.25'], autolag='AIC')
+# The null hypothesis is rejected; it suggests the time series does not have a unit root, meaning it is stationary.
+
+# make the VAR model and select the max lags
+model = VAR(df_train)
+x = model.select_order(maxlags=8)
+print(x.summary())
+
+# next run the model
+model = VAR(df_train)
+model_fitted = model.fit(1)
+model_fitted.summary()
+
